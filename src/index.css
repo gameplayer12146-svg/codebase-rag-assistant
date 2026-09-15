@@ -1,0 +1,6 @@
+@import "tailwindcss";
+
+.monaco-line-highlight {
+  background-color: rgba(16, 185, 129, 0.18) !important;
+  border-left: 3px solid #10b981 !important;
+}

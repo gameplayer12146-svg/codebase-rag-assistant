@@ -1,0 +1,6 @@
+{
+  "name": "Codebase RAG Assistant",
+  "description": "Understand unfamiliar codebases using AI-powered semantic code search and code-aware parsing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
