@@ -57,13 +57,18 @@ export const IGNORED_FILENAMES = new Set([
 ]);
 
 export const SUPPORTED_EXTENSIONS: Record<string, string> = {
+  // Python
   '.py': 'python',
+  '.pyw': 'python',
+  '.ipynb': 'python',
+  // TypeScript & JavaScript
   '.ts': 'typescript',
   '.tsx': 'typescript',
   '.js': 'javascript',
   '.jsx': 'javascript',
   '.mjs': 'javascript',
   '.cjs': 'javascript',
+  // Systems & compiled
   '.go': 'go',
   '.java': 'java',
   '.cpp': 'cpp',
@@ -72,12 +77,63 @@ export const SUPPORTED_EXTENSIONS: Record<string, string> = {
   '.c': 'c',
   '.h': 'c',
   '.hpp': 'cpp',
+  '.hxx': 'cpp',
   '.rs': 'rust',
+  '.cs': 'csharp',
+  '.kt': 'kotlin',
+  '.kts': 'kotlin',
+  '.swift': 'swift',
+  '.scala': 'scala',
+  '.dart': 'dart',
+  // Scripting & shells
+  '.rb': 'ruby',
+  '.rake': 'ruby',
+  '.php': 'php',
+  '.lua': 'lua',
+  '.sh': 'shell',
+  '.bash': 'shell',
+  '.zsh': 'shell',
+  '.fish': 'shell',
+  // Web & UI
+  '.html': 'html',
+  '.htm': 'html',
+  '.css': 'css',
+  '.scss': 'css',
+  '.sass': 'css',
+  '.less': 'css',
+  // Documentation & text
+  '.md': 'markdown',
+  '.markdown': 'markdown',
+  '.mdown': 'markdown',
+  '.mdx': 'markdown',
+  '.txt': 'text',
+  '.rst': 'text',
+  // Config & Data schemas
   '.json': 'json',
   '.yaml': 'yaml',
   '.yml': 'yaml',
   '.toml': 'toml',
   '.sql': 'sql',
+  '.xml': 'xml',
+  '.graphql': 'graphql',
+  '.gql': 'graphql',
+  '.proto': 'protobuf',
+  '.prisma': 'prisma',
+};
+
+export const SPECIAL_FILENAMES: Record<string, string> = {
+  'dockerfile': 'dockerfile',
+  'containerfile': 'dockerfile',
+  'makefile': 'makefile',
+  'jenkinsfile': 'jenkinsfile',
+  'procfile': 'procfile',
+  'gemfile': 'ruby',
+  'rakefile': 'ruby',
+  'vagrantfile': 'ruby',
+  'readme': 'markdown',
+  'license': 'text',
+  'contributing': 'markdown',
+  'changelog': 'markdown',
 };
 
 export interface FilterResult {
@@ -91,6 +147,7 @@ export function filterFile(filePath: string, fileSize?: number): FilterResult {
   const normalized = filePath.replace(/\\/g, '/');
   const parts = normalized.split('/');
   const fileName = parts[parts.length - 1];
+  const lowerName = fileName.toLowerCase();
   const ext = path.extname(fileName).toLowerCase();
 
   // Check ignored directories
@@ -118,6 +175,23 @@ export function filterFile(filePath: string, fileSize?: number): FilterResult {
   // Check size: skip files larger than 1.5MB to prevent memory exhaustion
   if (fileSize && fileSize > 1.5 * 1024 * 1024) {
     return { isSupported: false, isIgnored: true, reason: 'File exceeds 1.5MB limit' };
+  }
+
+  // Check special filenames (e.g. Dockerfile, Makefile, README)
+  if (SPECIAL_FILENAMES[lowerName]) {
+    return {
+      isSupported: true,
+      isIgnored: false,
+      language: SPECIAL_FILENAMES[lowerName],
+    };
+  }
+
+  if (lowerName.startsWith('dockerfile.')) {
+    return { isSupported: true, isIgnored: false, language: 'dockerfile' };
+  }
+
+  if (lowerName.startsWith('readme.') && !IGNORED_EXTENSIONS.has(ext)) {
+    return { isSupported: true, isIgnored: false, language: 'markdown' };
   }
 
   // Check supported extension

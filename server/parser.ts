@@ -36,6 +36,12 @@ export function parseSourceCode(
       case 'cpp':
         parseCpp(repositoryId, filePath, lines, symbols);
         break;
+      case 'markdown':
+        parseMarkdown(repositoryId, filePath, lines, symbols);
+        break;
+      case 'shell':
+        parseShell(repositoryId, filePath, lines, symbols);
+        break;
       default:
         parseGeneric(repositoryId, filePath, lines, language, symbols);
         break;
@@ -586,6 +592,103 @@ function parseCpp(
     }
 
     i++;
+  }
+}
+
+// ----------------------------------------------------
+// Markdown / Documentation Parser
+// ----------------------------------------------------
+function parseMarkdown(
+  repoId: string,
+  filePath: string,
+  lines: string[],
+  out: CodeSymbol[]
+) {
+  let currentHeading = filePath.split('/').pop() || 'README';
+  let sectionStart = 1;
+  let sectionLines: string[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const match = line.match(/^(#{1,4})\s+(.+)$/);
+
+    if (match && sectionLines.length > 0) {
+      out.push({
+        id: `${repoId}_${filePath}_sec_${sectionStart}`,
+        repository_id: repoId,
+        file_path: filePath,
+        language: 'markdown',
+        symbol_type: 'document',
+        symbol_name: currentHeading,
+        start_line: sectionStart,
+        end_line: i,
+        code: sectionLines.join('\n'),
+      });
+      sectionLines = [];
+      sectionStart = i + 1;
+      currentHeading = match[2].trim();
+    }
+
+    sectionLines.push(line);
+  }
+
+  if (sectionLines.length > 0) {
+    out.push({
+      id: `${repoId}_${filePath}_sec_${sectionStart}`,
+      repository_id: repoId,
+      file_path: filePath,
+      language: 'markdown',
+      symbol_type: 'document',
+      symbol_name: currentHeading,
+      start_line: sectionStart,
+      end_line: lines.length,
+      code: sectionLines.join('\n'),
+    });
+  }
+}
+
+// ----------------------------------------------------
+// Shell Script Parser
+// ----------------------------------------------------
+function parseShell(
+  repoId: string,
+  filePath: string,
+  lines: string[],
+  out: CodeSymbol[]
+) {
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    // Match function name() { or function name {
+    const fnMatch = trimmed.match(/^(?:function\s+)?([a-zA-Z0-9_-]+)\s*\(\)\s*\{/) ||
+                    trimmed.match(/^function\s+([a-zA-Z0-9_-]+)\s*\{/);
+    if (fnMatch) {
+      const fnName = fnMatch[1];
+      const startLine = i + 1;
+      const endLine = findClosingBrace(lines, i);
+      out.push({
+        id: `${repoId}_${filePath}_${fnName}_${startLine}`,
+        repository_id: repoId,
+        file_path: filePath,
+        language: 'shell',
+        symbol_type: 'function',
+        symbol_name: fnName,
+        start_line: startLine,
+        end_line: endLine,
+        code: lines.slice(startLine - 1, endLine).join('\n'),
+        signature: trimmed,
+      });
+      i = Math.max(i + 1, endLine);
+      continue;
+    }
+    i++;
+  }
+
+  // If no functions extracted, fall back to generic chunks
+  if (out.length === 0) {
+    parseGeneric(repoId, filePath, lines, 'shell', out);
   }
 }
 

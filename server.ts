@@ -52,8 +52,8 @@ async function startServer() {
     } catch (err: any) {
       console.error('Error creating repository from Git:', err);
       const msg = (err?.message || '').toLowerCase();
-      const isNotFound = msg.includes('not found') || msg.includes('private') || msg.includes('does not exist');
-      const isBadRequest = msg.includes('invalid repository format') || msg.includes('invalid');
+      const isNotFound = msg.includes('not found') || msg.includes('private') || msg.includes('does not exist') || msg.includes('could not be found');
+      const isBadRequest = msg.includes('invalid repository format') || msg.includes('invalid') || msg.includes('provide a valid');
       const status = isNotFound ? 404 : isBadRequest ? 400 : 500;
       res.status(status).json({ error: err?.message || 'Failed to ingest repository' });
     }
@@ -63,7 +63,7 @@ async function startServer() {
   app.post(
     '/api/repositories/upload',
     (req, res, next) => {
-      upload.single('file')(req, res, err => {
+      upload.single('file')(req as any, res as any, err => {
         if (err) {
           if ((err as any).code === 'LIMIT_FILE_SIZE') {
             return res.status(413).json({ error: 'ZIP file exceeds the 50MB maximum size limit.' });

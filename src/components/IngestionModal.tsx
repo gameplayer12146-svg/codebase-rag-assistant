@@ -72,6 +72,17 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
   // Real pipeline progress tracker
   const [currentStage, setCurrentStage] = useState<string | null>(null);
   const [progressPercent, setProgressPercent] = useState(0);
+  const pollTimerRef = React.useRef<any>(null);
+
+  // Clear polling timer on unmount or close
+  React.useEffect(() => {
+    return () => {
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    };
+  }, []);
 
   // Reset states whenever modal opens or defaultMode changes
   React.useEffect(() => {
@@ -81,6 +92,11 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
       setIsSubmitting(false);
       setCurrentStage(null);
       setProgressPercent(0);
+    } else {
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
     }
   }, [isOpen, defaultMode]);
 
@@ -153,7 +169,11 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
   };
 
   const trackIndexing = (repoId: string) => {
-    const interval = setInterval(async () => {
+    if (pollTimerRef.current) {
+      clearInterval(pollTimerRef.current);
+    }
+
+    pollTimerRef.current = setInterval(async () => {
       try {
         const resp = await fetch(`/api/repositories/${repoId}`);
         if (resp.ok) {
@@ -171,12 +191,18 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
           }
 
           if (data.indexing_status === 'ready') {
-            clearInterval(interval);
+            if (pollTimerRef.current) {
+              clearInterval(pollTimerRef.current);
+              pollTimerRef.current = null;
+            }
             setIsSubmitting(false);
             onIngestComplete(data);
             onClose();
           } else if (data.indexing_status === 'failed') {
-            clearInterval(interval);
+            if (pollTimerRef.current) {
+              clearInterval(pollTimerRef.current);
+              pollTimerRef.current = null;
+            }
             setError(data.progress?.error || 'Indexing failed');
             setIsSubmitting(false);
           }
@@ -319,7 +345,7 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
                 <input
                   type="text"
                   required
-                  placeholder="https://github.com/iam-veeramalla/Docker-Zero-to-Hero or expressjs/express"
+                  placeholder="https://github.com/expressjs/express or owner/repo"
                   value={gitUrl}
                   onChange={e => {
                     setGitUrl(e.target.value);
@@ -330,10 +356,11 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
                 <div className="flex flex-wrap items-center gap-1.5 pt-1 text-[11px] text-neutral-400">
                   <span>Quick try:</span>
                   {[
-                    'iam-veeramalla/Docker-Zero-to-Hero',
+                    'gameplayer12146-svg/codebase-rag-assistant',
                     'expressjs/express',
                     'pallets/flask',
                     'tiangolo/fastapi',
+                    'iam-veeramalla/Docker-Zero-to-Hero',
                   ].map(example => (
                     <button
                       key={example}
@@ -349,7 +376,7 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
                   ))}
                 </div>
                 <p className="text-[11px] text-neutral-500">
-                  Public Git repositories will be cloned and code-aware parsed automatically.
+                  Works with GitHub, GitLab, Bitbucket, and any public Git repository URL or <span className="font-mono text-neutral-400">owner/repo</span> format.
                 </p>
               </div>
 

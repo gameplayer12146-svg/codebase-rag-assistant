@@ -6,7 +6,8 @@ export type SymbolType =
   | 'route'
   | 'module'
   | 'import_block'
-  | 'config';
+  | 'config'
+  | 'document';
 
 export interface CodeSymbol {
   id: string;
