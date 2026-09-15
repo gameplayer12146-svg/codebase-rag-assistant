@@ -55,10 +55,17 @@ export function App() {
     try {
       const resp = await fetch('/api/repositories');
       if (resp.ok) {
-        const data: RepositoryMetadata[] = await resp.json();
-        setRepositories(data);
-        if (data.length > 0 && !activeRepoId) {
-          setActiveRepoId(data[0].id);
+        const text = await resp.text();
+        try {
+          const data: RepositoryMetadata[] = JSON.parse(text);
+          if (Array.isArray(data)) {
+            setRepositories(data);
+            if (data.length > 0 && !activeRepoId) {
+              setActiveRepoId(data[0].id);
+            }
+          }
+        } catch {
+          // Ignore non-JSON during startup
         }
       }
     } catch (err) {
@@ -72,8 +79,17 @@ export function App() {
 
     // Load file tree
     fetch(`/api/repositories/${activeRepoId}/files`)
-      .then(r => r.json())
+      .then(async r => {
+        if (!r.ok) return [];
+        const text = await r.text();
+        try {
+          return JSON.parse(text);
+        } catch {
+          return [];
+        }
+      })
       .then((tree: FileTreeNode[]) => {
+        if (!Array.isArray(tree)) return;
         setFileTree(tree);
         // Find first file in tree to open by default
         const findFirstFile = (nodes: FileTreeNode[]): string | null => {
@@ -96,7 +112,15 @@ export function App() {
 
     // Load architecture graph
     fetch(`/api/repositories/${activeRepoId}/graph`)
-      .then(r => r.json())
+      .then(async r => {
+        if (!r.ok) return { nodes: [], edges: [] };
+        const text = await r.text();
+        try {
+          return JSON.parse(text);
+        } catch {
+          return { nodes: [], edges: [] };
+        }
+      })
       .then((g: ArchitectureGraph) => setGraph(g))
       .catch(console.error);
   }, [activeRepoId]);
@@ -115,8 +139,13 @@ export function App() {
     try {
       const resp = await fetch(`/api/repositories/${activeRepoId}/file-content?path=${encodeURIComponent(filePath)}`);
       if (resp.ok) {
-        const data = await resp.json();
-        setFileContent(data.content);
+        const text = await resp.text();
+        try {
+          const data = JSON.parse(text);
+          setFileContent(data.content || '');
+        } catch {
+          setFileContent(text);
+        }
       } else {
         setFileContent('// Failed to load file content');
       }
@@ -156,11 +185,21 @@ export function App() {
         body: JSON.stringify({ question }),
       });
 
-      if (!resp.ok) {
-        throw new Error('RAG query failed');
+      const text = await resp.text();
+      let ragData: any;
+      try {
+        ragData = JSON.parse(text);
+      } catch {
+        throw new Error(
+          resp.ok
+            ? 'Invalid response format received from assistant.'
+            : `Service temporarily unavailable (${resp.status} ${resp.statusText || 'Error'}). Please try again in a moment.`
+        );
       }
 
-      const ragData = await resp.json();
+      if (!resp.ok) {
+        throw new Error(ragData.error || 'RAG query failed');
+      }
 
       const assistantMessage: ChatMessage = {
         id: `msg_ai_${Date.now()}`,

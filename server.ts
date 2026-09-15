@@ -42,35 +42,51 @@ async function startServer() {
   // POST /api/repositories - Create repository from Git URL or preset
   app.post('/api/repositories', async (req, res) => {
     try {
-      const { repoUrl, name } = req.body;
-      if (!repoUrl) {
-        return res.status(400).json({ error: 'Repository URL is required' });
+      const { repoUrl } = req.body || {};
+      if (!repoUrl || typeof repoUrl !== 'string' || !repoUrl.trim()) {
+        return res.status(400).json({ error: 'Repository URL is required and must be a non-empty string' });
       }
 
-      const metadata = await repoManager.createFromGitUrl(repoUrl);
+      const metadata = await repoManager.createFromGitUrl(repoUrl.trim());
       res.status(201).json(metadata);
     } catch (err: any) {
+      console.error('Error creating repository from Git:', err);
       res.status(500).json({ error: err?.message || 'Failed to ingest repository' });
     }
   });
 
   // POST /api/repositories/upload - Upload repository as ZIP
-  app.post('/api/repositories/upload', upload.single('file'), async (req, res) => {
-    try {
-      if (!req.file) {
-        return res.status(400).json({ error: 'ZIP file is required' });
+  app.post(
+    '/api/repositories/upload',
+    (req, res, next) => {
+      upload.single('file')(req, res, err => {
+        if (err) {
+          if ((err as any).code === 'LIMIT_FILE_SIZE') {
+            return res.status(413).json({ error: 'ZIP file exceeds the 50MB maximum size limit.' });
+          }
+          return res.status(400).json({ error: err.message || 'File upload failed.' });
+        }
+        next();
+      });
+    },
+    async (req, res) => {
+      try {
+        if (!req.file) {
+          return res.status(400).json({ error: 'ZIP file is required' });
+        }
+
+        const metadata = await repoManager.createFromZip(
+          req.file.buffer,
+          req.file.originalname || 'uploaded-repo.zip'
+        );
+
+        res.status(201).json(metadata);
+      } catch (err: any) {
+        console.error('Error processing ZIP upload:', err);
+        res.status(500).json({ error: err?.message || 'Failed to process ZIP upload' });
       }
-
-      const metadata = await repoManager.createFromZip(
-        req.file.buffer,
-        req.file.originalname || 'uploaded-repo.zip'
-      );
-
-      res.status(201).json(metadata);
-    } catch (err: any) {
-      res.status(500).json({ error: err?.message || 'Failed to process ZIP upload' });
     }
-  });
+  );
 
   // GET /api/repositories/:id - Get repository details and progress
   app.get('/api/repositories/:id', (req, res) => {
@@ -175,6 +191,22 @@ async function startServer() {
     } catch (err: any) {
       res.status(500).json({ error: err?.message || 'Failed to get graph' });
     }
+  });
+
+  // Catch-all for undefined /api routes: always return JSON 404 instead of HTML
+  app.all('/api/*', (req, res) => {
+    res.status(404).json({ error: `API endpoint '${req.path}' not found` });
+  });
+
+  // API error handler middleware
+  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    console.error('Unhandled API Error:', err);
+    if (res.headersSent) {
+      return next(err);
+    }
+    res.status(err.status || 500).json({
+      error: err?.message || 'Internal server error occurred',
+    });
   });
 
   // ----------------------------------------------------

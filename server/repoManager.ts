@@ -147,32 +147,70 @@ export class RepositoryManager {
     const id = `repo_zip_${Date.now()}`;
     const name = originalName.replace(/\.zip$/i, '') || 'uploaded-repository';
 
-    const zip = new AdmZip(fileBuffer);
-    const zipEntries = zip.getEntries();
+    let rawFiles: { path: string; content: string; size: number }[] = [];
 
-    const rawFiles: { path: string; content: string; size: number }[] = [];
+    try {
+      const zip = new AdmZip(fileBuffer);
+      const zipEntries = zip.getEntries();
 
-    for (const entry of zipEntries) {
-      if (entry.isDirectory) continue;
-
-      let entryPath = entry.entryName.replace(/\\/g, '/');
-      // If zip has a single root folder prefix, trim it for cleaner paths
-      const parts = entryPath.split('/');
-      if (parts.length > 1 && !parts[0].includes('.')) {
-        // Keep standard relative path
+      // Find common root prefix if archive has all files in one folder (e.g. repo-main/)
+      let commonPrefix = '';
+      const firstEntry = zipEntries.find(e => !e.isDirectory);
+      if (firstEntry) {
+        const slashIdx = firstEntry.entryName.indexOf('/');
+        if (slashIdx !== -1) {
+          const candidate = firstEntry.entryName.slice(0, slashIdx + 1);
+          const allShare = zipEntries
+            .filter(e => !e.isDirectory)
+            .every(e => e.entryName.startsWith(candidate));
+          if (allShare) {
+            commonPrefix = candidate;
+          }
+        }
       }
 
-      // Read content if not binary
-      try {
-        const content = entry.getData().toString('utf8');
-        rawFiles.push({
-          path: entryPath,
-          content,
-          size: entry.header.size,
-        });
-      } catch {
-        // skip binary or corrupt entries
+      for (const entry of zipEntries) {
+        if (entry.isDirectory) continue;
+
+        let entryPath = entry.entryName.replace(/\\/g, '/');
+        if (commonPrefix && entryPath.startsWith(commonPrefix)) {
+          entryPath = entryPath.slice(commonPrefix.length);
+        }
+
+        // Skip ignored directories early
+        if (
+          entryPath.startsWith('.git/') ||
+          entryPath.includes('node_modules/') ||
+          entryPath.includes('__pycache__/') ||
+          entryPath.includes('.next/') ||
+          entryPath.includes('dist/') ||
+          entryPath.includes('build/')
+        ) {
+          continue;
+        }
+
+        // Limit file size to 500KB per file to avoid event loop stalls
+        if (entry.header.size > 500 * 1024) continue;
+
+        try {
+          const content = entry.getData().toString('utf8');
+          rawFiles.push({
+            path: entryPath,
+            content,
+            size: entry.header.size,
+          });
+        } catch {
+          // skip binary or corrupt entries
+        }
+
+        if (rawFiles.length >= 600) break; // Maximum 600 files per repo
       }
+    } catch (err: any) {
+      throw new Error(`Failed to read ZIP archive: ${err?.message || 'Invalid or corrupt archive'}`);
+    }
+
+    if (rawFiles.length === 0) {
+      throw new Error('No readable source code files found in the provided ZIP archive');
     }
 
     return this.createAndIndexRepo(id, name, 'zip', undefined, rawFiles);
@@ -180,59 +218,123 @@ export class RepositoryManager {
 
   async createFromGitUrl(repoUrl: string): Promise<RepositoryMetadata> {
     const id = `repo_git_${Date.now()}`;
-    // Extract owner/repo name
-    const match = repoUrl.match(/github\.com\/([^/]+)\/([^/]+)/);
-    const repoName = match ? `${match[1]}-${match[2].replace(/\.git$/, '')}` : 'git-repository';
+    const cleanUrl = repoUrl.trim();
 
+    // Extract owner/repo from various formats:
+    // https://github.com/owner/repo
+    // github.com/owner/repo
+    // git@github.com:owner/repo.git
+    // owner/repo
+    let owner = '';
+    let repo = '';
+
+    const ghMatch = cleanUrl.match(/(?:github\.com[/:])([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+)/i);
+    if (ghMatch) {
+      owner = ghMatch[1];
+      repo = ghMatch[2].replace(/\.git$/, '').split('/')[0];
+    } else {
+      const shortMatch = cleanUrl.match(/^([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+)$/);
+      if (shortMatch) {
+        owner = shortMatch[1];
+        repo = shortMatch[2].replace(/\.git$/, '');
+      }
+    }
+
+    const repoName = owner && repo ? `${owner}-${repo}` : 'git-repository';
     let rawFiles: { path: string; content: string; size: number }[] = [];
 
-    // Attempt to download archive from GitHub zipball
-    if (match) {
-      const owner = match[1];
-      const repo = match[2].replace(/\.git$/, '');
-      const zipballUrl = `https://api.github.com/repos/${owner}/${repo}/zipball`;
+    if (owner && repo) {
+      // Candidate download URLs in priority order:
+      // 1. Direct GitHub main branch zip
+      // 2. Direct GitHub master branch zip
+      // 3. GitHub API zipball endpoint
+      const downloadCandidates = [
+        `https://github.com/${owner}/${repo}/archive/refs/heads/main.zip`,
+        `https://github.com/${owner}/${repo}/archive/refs/heads/master.zip`,
+        `https://api.github.com/repos/${owner}/${repo}/zipball`,
+      ];
 
-      try {
-        const resp = await fetch(zipballUrl, {
-          headers: {
-            'User-Agent': 'Codebase-RAG-Assistant',
-            Accept: 'application/vnd.github+json',
-          },
-        });
+      for (const candidateUrl of downloadCandidates) {
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 12000); // 12s timeout
 
-        if (resp.ok) {
-          const buffer = Buffer.from(await resp.arrayBuffer());
-          const zip = new AdmZip(buffer);
-          const entries = zip.getEntries();
+          const resp = await fetch(candidateUrl, {
+            signal: controller.signal,
+            headers: {
+              'User-Agent': 'Codebase-RAG-Assistant',
+              Accept: 'application/vnd.github+json, application/zip, */*',
+            },
+            redirect: 'follow',
+          });
+          clearTimeout(timeoutId);
 
-          for (const entry of entries) {
-            if (entry.isDirectory) continue;
-            // Trim GitHub's root folder prefix (e.g. owner-repo-hash/)
-            let entryPath = entry.entryName.replace(/\\/g, '/');
-            const slashIdx = entryPath.indexOf('/');
-            if (slashIdx !== -1) {
-              entryPath = entryPath.slice(slashIdx + 1);
+          if (resp.ok) {
+            const buffer = Buffer.from(await resp.arrayBuffer());
+            const zip = new AdmZip(buffer);
+            const entries = zip.getEntries();
+
+            // Find common root prefix (e.g. repo-main/)
+            let commonPrefix = '';
+            const firstFile = entries.find(e => !e.isDirectory);
+            if (firstFile) {
+              const slashIdx = firstFile.entryName.indexOf('/');
+              if (slashIdx !== -1) {
+                commonPrefix = firstFile.entryName.slice(0, slashIdx + 1);
+              }
             }
 
-            try {
-              const content = entry.getData().toString('utf8');
-              rawFiles.push({
-                path: entryPath,
-                content,
-                size: entry.header.size,
-              });
-            } catch {
-              // skip binary
+            for (const entry of entries) {
+              if (entry.isDirectory) continue;
+
+              let entryPath = entry.entryName.replace(/\\/g, '/');
+              if (commonPrefix && entryPath.startsWith(commonPrefix)) {
+                entryPath = entryPath.slice(commonPrefix.length);
+              }
+
+              // Skip ignored folders
+              if (
+                entryPath.startsWith('.git/') ||
+                entryPath.includes('node_modules/') ||
+                entryPath.includes('__pycache__/') ||
+                entryPath.includes('.next/') ||
+                entryPath.includes('dist/') ||
+                entryPath.includes('build/')
+              ) {
+                continue;
+              }
+
+              // Cap file size to 500KB
+              if (entry.header.size > 500 * 1024) continue;
+
+              try {
+                const content = entry.getData().toString('utf8');
+                rawFiles.push({
+                  path: entryPath,
+                  content,
+                  size: entry.header.size,
+                });
+              } catch {
+                // skip binary
+              }
+
+              if (rawFiles.length >= 600) break;
+            }
+
+            if (rawFiles.length > 0) {
+              console.log(`[RepoManager] Successfully ingested ${rawFiles.length} files from ${candidateUrl}`);
+              break; // Success!
             }
           }
+        } catch (err: any) {
+          console.log(`[RepoManager] Download attempt from ${candidateUrl} did not complete: ${err?.message || 'aborted'}`);
         }
-      } catch {
-        console.log('[RepoManager] GitHub download unavailable, using seeded project template.');
       }
     }
 
     // If git download was empty or rate-limited by GitHub API, provide realistic project structure
     if (rawFiles.length === 0) {
+      console.log(`[RepoManager] GitHub download unavailable for ${repoUrl}, providing seeded project template.`);
       rawFiles = SAMPLE_PYTHON_REPO.map(s => ({
         path: s.path,
         content: s.content,

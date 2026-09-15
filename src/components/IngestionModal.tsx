@@ -19,6 +19,32 @@ interface IngestionModalProps {
   onIngestComplete: (repo: RepositoryMetadata) => void;
 }
 
+// Safely parse API responses and gracefully handle HTML/proxy error pages
+async function safeReadJson<T = any>(resp: Response, fallbackError: string): Promise<T> {
+  const text = await resp.text();
+  let parsed: any;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    // Response is NOT valid JSON (e.g. HTML or gateway error)
+    if (!resp.ok) {
+      if (text.includes('<html') || text.startsWith('The page') || text.includes('Error')) {
+        throw new Error(
+          `Service returned an unexpected response (${resp.status} ${resp.statusText || 'Error'}). Please check the repository URL or try uploading as a ZIP file.`
+        );
+      }
+      throw new Error(text.slice(0, 160) || `${fallbackError} (HTTP ${resp.status})`);
+    }
+    throw new Error('Received unexpected non-JSON response from server.');
+  }
+
+  if (!resp.ok) {
+    throw new Error(parsed?.error || parsed?.message || `${fallbackError} (HTTP ${resp.status})`);
+  }
+
+  return parsed as T;
+}
+
 export const IngestionModal: React.FC<IngestionModalProps> = ({
   isOpen,
   onClose,
@@ -29,6 +55,7 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
   const [gitUrl, setGitUrl] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Real pipeline progress tracker
@@ -43,7 +70,7 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
 
     setIsSubmitting(true);
     setError(null);
-    setCurrentStage('Receiving Git repository...');
+    setCurrentStage('Connecting to repository & downloading files...');
     setProgressPercent(20);
 
     try {
@@ -53,12 +80,7 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
         body: JSON.stringify({ repoUrl: gitUrl.trim() }),
       });
 
-      if (!resp.ok) {
-        const data = await resp.json();
-        throw new Error(data.error || 'Failed to ingest repository');
-      }
-
-      const repo: RepositoryMetadata = await resp.json();
+      const repo = await safeReadJson<RepositoryMetadata>(resp, 'Failed to ingest repository');
       trackIndexing(repo.id);
     } catch (err: any) {
       setError(err?.message || 'Failed to ingest repository');
@@ -72,7 +94,7 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
 
     setIsSubmitting(true);
     setError(null);
-    setCurrentStage('Uploading and extracting ZIP archive...');
+    setCurrentStage('Uploading and unpacking ZIP archive...');
     setProgressPercent(25);
 
     try {
@@ -84,12 +106,7 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
         body: formData,
       });
 
-      if (!resp.ok) {
-        const data = await resp.json();
-        throw new Error(data.error || 'Failed to upload ZIP archive');
-      }
-
-      const repo: RepositoryMetadata = await resp.json();
+      const repo = await safeReadJson<RepositoryMetadata>(resp, 'Failed to upload ZIP archive');
       trackIndexing(repo.id);
     } catch (err: any) {
       setError(err?.message || 'Failed to upload ZIP archive');
@@ -102,7 +119,14 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
       try {
         const resp = await fetch(`/api/repositories/${repoId}`);
         if (resp.ok) {
-          const data: RepositoryMetadata = await resp.json();
+          const text = await resp.text();
+          let data: RepositoryMetadata;
+          try {
+            data = JSON.parse(text);
+          } catch {
+            return; // Skip transient non-JSON poll
+          }
+
           if (data.progress) {
             setCurrentStage(data.progress.message);
             setProgressPercent(data.progress.percent);
@@ -119,10 +143,33 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
             setIsSubmitting(false);
           }
         }
-      } catch (err) {
+      } catch {
         // continue polling
       }
     }, 800);
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = () => {
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const droppedFile = e.dataTransfer.files?.[0];
+    if (droppedFile) {
+      if (droppedFile.name.endsWith('.zip')) {
+        setFile(droppedFile);
+        setError(null);
+      } else {
+        setError('Please drop a valid .zip file archive.');
+      }
+    }
   };
 
   return (
@@ -215,16 +262,29 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
             <form onSubmit={handleGitSubmit} className="space-y-4">
               <div className="space-y-1.5">
                 <label className="text-xs font-medium text-neutral-300">
-                  GitHub / Git Repository URL
+                  GitHub / Git Repository URL or Owner/Repo
                 </label>
                 <input
-                  type="url"
+                  type="text"
                   required
-                  placeholder="https://github.com/tiangolo/fastapi"
+                  placeholder="https://github.com/expressjs/express or pallets/flask"
                   value={gitUrl}
                   onChange={e => setGitUrl(e.target.value)}
-                  className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-xs text-neutral-100 placeholder:text-neutral-500 focus:outline-none focus:border-emerald-500"
+                  className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-xs text-neutral-100 placeholder:text-neutral-500 focus:outline-none focus:border-emerald-500 font-mono"
                 />
+                <div className="flex items-center gap-1.5 pt-1 text-[11px] text-neutral-400">
+                  <span>Quick try:</span>
+                  {['expressjs/express', 'pallets/flask', 'tiangolo/fastapi'].map(example => (
+                    <button
+                      key={example}
+                      type="button"
+                      onClick={() => setGitUrl(`https://github.com/${example}`)}
+                      className="text-emerald-400 hover:text-emerald-300 underline font-mono text-[10px]"
+                    >
+                      {example}
+                    </button>
+                  ))}
+                </div>
                 <p className="text-[11px] text-neutral-500">
                   Public Git repositories will be cloned and code-aware parsed automatically.
                 </p>
@@ -244,23 +304,42 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
                 <label className="text-xs font-medium text-neutral-300">
                   Upload Codebase ZIP Archive
                 </label>
-                <div className="border-2 border-dashed border-neutral-800 hover:border-emerald-500/50 rounded-xl p-6 text-center cursor-pointer bg-neutral-950/60 transition-colors">
+                <div
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onDrop={handleDrop}
+                  className={`border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-colors ${
+                    isDragging
+                      ? 'border-emerald-400 bg-emerald-500/10'
+                      : 'border-neutral-800 hover:border-emerald-500/50 bg-neutral-950/60'
+                  }`}
+                >
                   <input
                     type="file"
                     accept=".zip"
-                    required
-                    onChange={e => setFile(e.target.files?.[0] || null)}
+                    onChange={e => {
+                      if (e.target.files?.[0]) {
+                        setFile(e.target.files[0]);
+                        setError(null);
+                      }
+                    }}
                     className="hidden"
                     id="zip-file-input"
                   />
                   <label htmlFor="zip-file-input" className="cursor-pointer space-y-2 block">
-                    <UploadCloud className="w-8 h-8 mx-auto text-neutral-500" />
+                    <UploadCloud className={`w-8 h-8 mx-auto ${isDragging ? 'text-emerald-400' : 'text-neutral-500'}`} />
                     <div className="text-xs text-neutral-300 font-medium">
-                      {file ? file.name : 'Click to select or drop ZIP file here'}
+                      {file ? file.name : isDragging ? 'Drop the ZIP archive here' : 'Click to select or drop ZIP file here'}
                     </div>
-                    <div className="text-[11px] text-neutral-500">
-                      Supports .zip files containing Python, TypeScript, Go, Java, or C/C++ source code
-                    </div>
+                    {file ? (
+                      <div className="text-[11px] text-emerald-400 font-mono">
+                        {(file.size / (1024 * 1024)).toFixed(2)} MB selected
+                      </div>
+                    ) : (
+                      <div className="text-[11px] text-neutral-500">
+                        Supports .zip archives containing Python, TypeScript, Go, Java, or C/C++ source code (up to 50MB)
+                      </div>
+                    )}
                   </label>
                 </div>
               </div>
