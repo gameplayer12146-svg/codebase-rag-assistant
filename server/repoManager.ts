@@ -1,4 +1,9 @@
 import AdmZip from 'adm-zip';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import {
   CodeChunk,
   CodeSymbol,
@@ -8,6 +13,8 @@ import {
   RagResponse,
   ArchitectureGraph,
 } from '../src/types';
+
+const execFileAsync = promisify(execFile);
 import { filterFile } from './filter';
 import { parseSourceCode } from './parser';
 import { chunkSymbols } from './chunker';
@@ -220,137 +227,218 @@ export class RepositoryManager {
     const id = `repo_git_${Date.now()}`;
     const cleanUrl = repoUrl.trim();
 
-    // Extract owner/repo from various formats:
-    // https://github.com/owner/repo
-    // https://github.com/owner/repo/tree/main/...
-    // github.com/owner/repo
-    // git@github.com:owner/repo.git
-    // owner/repo
+    // 1. Normalize and extract git information
     let owner = '';
     let repo = '';
+    let branch = '';
+    let cloneUrl = '';
 
-    // Strip protocols, query params, hash, and trailing slash
-    const sanitizedUrl = cleanUrl
+    // Strip hash, query, trailing slashes
+    let sanitized = cleanUrl.split('?')[0].split('#')[0].replace(/\/+$/, '');
+
+    // Check for branch specified in URL, e.g. /tree/<branch> or /blob/<branch>
+    const treeMatch = sanitized.match(/\/(?:tree|blob)\/([^\/]+)(?:\/(.*))?$/);
+    if (treeMatch) {
+      branch = treeMatch[1];
+      sanitized = sanitized.replace(/\/(?:tree|blob)\/[^\/]+(?:\/.*)?$/, '');
+    }
+
+    // Strip protocols for matching
+    const stripped = sanitized
       .replace(/^https?:\/\//i, '')
       .replace(/^git@github\.com:/i, 'github.com/')
-      .split('?')[0]
-      .split('#')[0]
-      .replace(/\/+$/, '');
+      .replace(/^git:\/\//i, '');
 
-    const ghMatch = sanitizedUrl.match(/github\.com\/([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+)/i);
+    const ghMatch = stripped.match(/github\.com\/([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+)/i);
+    const glMatch = stripped.match(/gitlab\.com\/([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+)/i);
+
     if (ghMatch) {
       owner = ghMatch[1];
       repo = ghMatch[2].replace(/\.git$/, '');
+      cloneUrl = `https://github.com/${owner}/${repo}.git`;
+    } else if (glMatch) {
+      owner = glMatch[1];
+      repo = glMatch[2].replace(/\.git$/, '');
+      cloneUrl = `https://gitlab.com/${owner}/${repo}.git`;
     } else {
-      const shortMatch = sanitizedUrl.match(/^([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+)/);
+      // Check for shorthand owner/repo (e.g. expressjs/express or pallets/flask)
+      const shortMatch = stripped.match(/^([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+)$/);
       if (shortMatch) {
         owner = shortMatch[1];
         repo = shortMatch[2].replace(/\.git$/, '');
+        cloneUrl = `https://github.com/${owner}/${repo}.git`;
+      } else if (cleanUrl.startsWith('http://') || cleanUrl.startsWith('https://')) {
+        cloneUrl = cleanUrl;
       }
+    }
+
+    if (!cloneUrl) {
+      throw new Error(
+        `Invalid repository format: "${cleanUrl}". Please provide a GitHub URL (e.g. https://github.com/expressjs/express) or owner/repo format.`
+      );
     }
 
     const repoName = owner && repo ? `${owner}-${repo}` : 'git-repository';
     let rawFiles: { path: string; content: string; size: number }[] = [];
 
-    if (owner && repo) {
-      // Candidate download URLs in priority order:
-      // 1. Direct GitHub main branch zip
-      // 2. Direct GitHub master branch zip
-      // 3. GitHub API zipball endpoint
-      const downloadCandidates = [
-        `https://github.com/${owner}/${repo}/archive/refs/heads/main.zip`,
-        `https://github.com/${owner}/${repo}/archive/refs/heads/master.zip`,
-        `https://codeload.github.com/${owner}/${repo}/zip/refs/heads/main`,
-        `https://codeload.github.com/${owner}/${repo}/zip/refs/heads/master`,
-        `https://api.github.com/repos/${owner}/${repo}/zipball`,
-      ];
+    // Temporary isolated directory for fast git shallow clone
+    const tempDir = path.join(
+      os.tmpdir(),
+      `rag_repo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    );
 
-      for (const candidateUrl of downloadCandidates) {
-        try {
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 12000); // 12s timeout
+    let cloneError: any = null;
+    try {
+      const gitArgs = ['clone', '--depth', '1'];
+      if (branch) {
+        gitArgs.push('--branch', branch);
+      }
+      gitArgs.push(cloneUrl, tempDir);
 
-          const resp = await fetch(candidateUrl, {
-            signal: controller.signal,
-            headers: {
-              'User-Agent': 'Codebase-RAG-Assistant',
-              Accept: 'application/vnd.github+json, application/zip, */*',
-            },
-            redirect: 'follow',
-          });
-          clearTimeout(timeoutId);
+      await execFileAsync('git', gitArgs, {
+        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+        timeout: 25000,
+      });
 
-          if (resp.ok) {
-            const buffer = Buffer.from(await resp.arrayBuffer());
-            const zip = new AdmZip(buffer);
-            const entries = zip.getEntries();
+      // Recursively walk tempDir and collect source files
+      const walk = (dir: string, rel: string) => {
+        const items = fs.readdirSync(dir, { withFileTypes: true });
+        for (const item of items) {
+          if (
+            item.name === '.git' ||
+            item.name === 'node_modules' ||
+            item.name === '__pycache__' ||
+            item.name === '.next' ||
+            item.name === 'dist' ||
+            item.name === 'build' ||
+            item.name === '.venv' ||
+            item.name === 'venv'
+          ) {
+            continue;
+          }
 
-            // Find common root prefix (e.g. repo-main/)
-            let commonPrefix = '';
-            const firstFile = entries.find(e => !e.isDirectory);
-            if (firstFile) {
-              const slashIdx = firstFile.entryName.indexOf('/');
-              if (slashIdx !== -1) {
-                commonPrefix = firstFile.entryName.slice(0, slashIdx + 1);
-              }
-            }
+          const fullPath = path.join(dir, item.name);
+          const relPath = rel ? `${rel}/${item.name}` : item.name;
 
-            for (const entry of entries) {
-              if (entry.isDirectory) continue;
-
-              let entryPath = entry.entryName.replace(/\\/g, '/');
-              if (commonPrefix && entryPath.startsWith(commonPrefix)) {
-                entryPath = entryPath.slice(commonPrefix.length);
-              }
-
-              // Skip ignored folders
-              if (
-                entryPath.startsWith('.git/') ||
-                entryPath.includes('node_modules/') ||
-                entryPath.includes('__pycache__/') ||
-                entryPath.includes('.next/') ||
-                entryPath.includes('dist/') ||
-                entryPath.includes('build/')
-              ) {
-                continue;
-              }
-
-              // Cap file size to 500KB
-              if (entry.header.size > 500 * 1024) continue;
-
+          if (item.isDirectory()) {
+            walk(fullPath, relPath);
+          } else if (item.isFile()) {
+            const stat = fs.statSync(fullPath);
+            if (stat.size <= 500 * 1024) {
               try {
-                const content = entry.getData().toString('utf8');
+                const content = fs.readFileSync(fullPath, 'utf8');
                 rawFiles.push({
-                  path: entryPath,
+                  path: relPath,
                   content,
-                  size: entry.header.size,
+                  size: stat.size,
                 });
               } catch {
-                // skip binary
+                // Skip binary or unreadable file
               }
-
-              if (rawFiles.length >= 600) break;
-            }
-
-            if (rawFiles.length > 0) {
-              console.log(`[RepoManager] Successfully ingested ${rawFiles.length} files from ${candidateUrl}`);
-              break; // Success!
             }
           }
-        } catch (err: any) {
-          console.log(`[RepoManager] Download attempt from ${candidateUrl} did not complete: ${err?.message || 'aborted'}`);
+
+          if (rawFiles.length >= 600) break;
+        }
+      };
+
+      walk(tempDir, '');
+      console.log(`[RepoManager] Successfully cloned ${rawFiles.length} files from ${cloneUrl}`);
+    } catch (err: any) {
+      cloneError = err;
+      console.warn(`[RepoManager] Git clone failed for ${cloneUrl}:`, err?.message || err);
+    } finally {
+      // Ensure tempDir is always deleted
+      try {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      } catch {
+        // Ignore cleanup failure
+      }
+    }
+
+    // If git clone failed, inspect the error cause
+    if (rawFiles.length === 0 && cloneError) {
+      const errMsg = ((cloneError.message || '') + (cloneError.stderr || '')).toLowerCase();
+      if (
+        errMsg.includes('terminal prompts disabled') ||
+        errMsg.includes('could not read username') ||
+        errMsg.includes('repository not found') ||
+        errMsg.includes('remote: not found') ||
+        errMsg.includes('not found')
+      ) {
+        throw new Error(
+          `Repository "${cleanUrl}" was not found or is private. Please ensure the repository is public and the link is spelled correctly.`
+        );
+      }
+
+      // If connection error, try HTTP archive zip fallback if owner & repo are known
+      if (owner && repo) {
+        console.log(`[RepoManager] Attempting HTTP archive zip fallback for ${owner}/${repo}...`);
+        const fallbackCandidates = [
+          `https://codeload.github.com/${owner}/${repo}/zip/refs/heads/${branch || 'main'}`,
+          `https://codeload.github.com/${owner}/${repo}/zip/refs/heads/master`,
+          `https://github.com/${owner}/${repo}/archive/refs/heads/${branch || 'main'}.zip`,
+        ];
+
+        for (const candidate of fallbackCandidates) {
+          try {
+            const controller = new AbortController();
+            const tid = setTimeout(() => controller.abort(), 10000);
+            const resp = await fetch(candidate, {
+              signal: controller.signal,
+              headers: { 'User-Agent': 'Codebase-RAG-Assistant' },
+            });
+            clearTimeout(tid);
+
+            if (resp.ok) {
+              const buf = Buffer.from(await resp.arrayBuffer());
+              const zip = new AdmZip(buf);
+              const entries = zip.getEntries();
+              let commonPrefix = '';
+              const first = entries.find(e => !e.isDirectory);
+              if (first) {
+                const sIdx = first.entryName.indexOf('/');
+                if (sIdx !== -1) commonPrefix = first.entryName.slice(0, sIdx + 1);
+              }
+
+              for (const entry of entries) {
+                if (entry.isDirectory) continue;
+                let entryPath = entry.entryName.replace(/\\/g, '/');
+                if (commonPrefix && entryPath.startsWith(commonPrefix)) {
+                  entryPath = entryPath.slice(commonPrefix.length);
+                }
+                if (
+                  entryPath.startsWith('.git/') ||
+                  entryPath.includes('node_modules/') ||
+                  entryPath.includes('__pycache__/') ||
+                  entryPath.includes('dist/')
+                ) {
+                  continue;
+                }
+                if (entry.header.size > 500 * 1024) continue;
+                try {
+                  rawFiles.push({
+                    path: entryPath,
+                    content: entry.getData().toString('utf8'),
+                    size: entry.header.size,
+                  });
+                } catch {}
+                if (rawFiles.length >= 600) break;
+              }
+
+              if (rawFiles.length > 0) break;
+            }
+          } catch {
+            // Continue fallback loop
+          }
         }
       }
     }
 
-    // If git download was empty or rate-limited by GitHub API, provide realistic project structure
     if (rawFiles.length === 0) {
-      console.log(`[RepoManager] GitHub download unavailable for ${repoUrl}, providing seeded project template.`);
-      rawFiles = SAMPLE_PYTHON_REPO.map(s => ({
-        path: s.path,
-        content: s.content,
-        size: Buffer.byteLength(s.content, 'utf8'),
-      }));
+      throw new Error(
+        `Unable to download repository "${cleanUrl}". Please confirm the repository is public and accessible, or download it as a ZIP file and upload directly.`
+      );
     }
 
     return this.createAndIndexRepo(id, repoName, 'git', repoUrl, rawFiles);

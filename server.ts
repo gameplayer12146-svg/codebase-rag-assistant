@@ -51,7 +51,11 @@ async function startServer() {
       res.status(201).json(metadata);
     } catch (err: any) {
       console.error('Error creating repository from Git:', err);
-      res.status(500).json({ error: err?.message || 'Failed to ingest repository' });
+      const msg = (err?.message || '').toLowerCase();
+      const isNotFound = msg.includes('not found') || msg.includes('private') || msg.includes('does not exist');
+      const isBadRequest = msg.includes('invalid repository format') || msg.includes('invalid');
+      const status = isNotFound ? 404 : isBadRequest ? 400 : 500;
+      res.status(status).json({ error: err?.message || 'Failed to ingest repository' });
     }
   });
 

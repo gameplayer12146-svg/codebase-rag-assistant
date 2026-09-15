@@ -29,13 +29,13 @@ async function safeReadJson<T = any>(resp: Response, fallbackError: string): Pro
     // Response is NOT valid JSON (e.g. HTML or gateway error)
     if (!resp.ok) {
       if (resp.status === 404) {
-        throw new Error('Repository or endpoint resource was not found (404). Please verify the GitHub URL or repository name, or try uploading the codebase directly as a ZIP archive.');
+        throw new Error('Repository was not found (404). Please verify the GitHub URL or repository name, or try uploading the codebase as a ZIP archive.');
       }
       if (resp.status === 502 || resp.status === 503 || resp.status === 504) {
         throw new Error('The service is momentarily busy or restarting. Please try again in a few seconds.');
       }
       if (resp.status === 413) {
-        throw new Error('The file exceeds the maximum allowed upload limit. Please upload a smaller repository archive.');
+        throw new Error('The file exceeds the maximum allowed upload limit (50MB). Please upload a smaller repository archive.');
       }
       if (text.includes('<html') || text.startsWith('The page') || text.includes('Error')) {
         throw new Error(
