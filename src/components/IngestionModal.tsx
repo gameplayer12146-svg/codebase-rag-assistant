@@ -29,13 +29,15 @@ async function safeReadJson<T = any>(resp: Response, fallbackError: string): Pro
     // Response is NOT valid JSON (e.g. HTML or gateway error)
     if (!resp.ok) {
       if (resp.status === 404) {
-        throw new Error('Repository was not found (404). Please verify the GitHub URL or repository name, or try uploading the codebase as a ZIP archive.');
+        throw new Error(
+          'The repository could not be located or is private. Please check the URL spelling, ensure the repository is public, or upload it as a ZIP file.'
+        );
       }
       if (resp.status === 502 || resp.status === 503 || resp.status === 504) {
-        throw new Error('The service is momentarily busy or restarting. Please try again in a few seconds.');
+        throw new Error('The indexing service is briefly restarting or busy. Please retry in a few moments.');
       }
       if (resp.status === 413) {
-        throw new Error('The file exceeds the maximum allowed upload limit (50MB). Please upload a smaller repository archive.');
+        throw new Error('The archive exceeds the maximum upload limit (50MB). Please select a smaller codebase archive.');
       }
       if (text.includes('<html') || text.startsWith('The page') || text.includes('Error')) {
         throw new Error(
@@ -71,11 +73,29 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
   const [currentStage, setCurrentStage] = useState<string | null>(null);
   const [progressPercent, setProgressPercent] = useState(0);
 
+  // Reset states whenever modal opens or defaultMode changes
+  React.useEffect(() => {
+    if (isOpen) {
+      setMode(defaultMode);
+      setError(null);
+      setIsSubmitting(false);
+      setCurrentStage(null);
+      setProgressPercent(0);
+    }
+  }, [isOpen, defaultMode]);
+
   if (!isOpen) return null;
+
+  const handleModeChange = (newMode: 'git' | 'zip') => {
+    if (isSubmitting) return;
+    setMode(newMode);
+    setError(null); // Clear previous tab's error
+  };
 
   const handleGitSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!gitUrl.trim()) return;
+    const targetUrl = gitUrl.trim();
+    if (!targetUrl) return;
 
     setIsSubmitting(true);
     setError(null);
@@ -86,7 +106,7 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
       const resp = await fetch('/api/repositories', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ repoUrl: gitUrl.trim() }),
+        body: JSON.stringify({ repoUrl: targetUrl }),
       });
 
       const repo = await safeReadJson<RepositoryMetadata>(resp, 'Failed to ingest repository');
@@ -100,6 +120,15 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
   const handleZipSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!file) return;
+
+    if (!file.name.toLowerCase().endsWith('.zip')) {
+      setError('Please select a valid .zip file archive.');
+      return;
+    }
+    if (file.size > 50 * 1024 * 1024) {
+      setError(`Archive exceeds the 50MB limit (${(file.size / (1024 * 1024)).toFixed(1)}MB). Please choose a smaller archive.`);
+      return;
+    }
 
     setIsSubmitting(true);
     setError(null);
@@ -172,12 +201,16 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
     setIsDragging(false);
     const droppedFile = e.dataTransfer.files?.[0];
     if (droppedFile) {
-      if (droppedFile.name.endsWith('.zip')) {
-        setFile(droppedFile);
-        setError(null);
-      } else {
+      if (!droppedFile.name.toLowerCase().endsWith('.zip')) {
         setError('Please drop a valid .zip file archive.');
+        return;
       }
+      if (droppedFile.size > 50 * 1024 * 1024) {
+        setError(`Archive exceeds the 50MB limit (${(droppedFile.size / (1024 * 1024)).toFixed(1)}MB). Please choose a smaller archive.`);
+        return;
+      }
+      setFile(droppedFile);
+      setError(null);
     }
   };
 
@@ -209,7 +242,7 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
           <button
             type="button"
             disabled={isSubmitting}
-            onClick={() => setMode('git')}
+            onClick={() => handleModeChange('git')}
             className={`py-2 text-xs font-medium rounded-lg transition-colors flex items-center justify-center gap-2 ${
               mode === 'git'
                 ? 'bg-neutral-800 text-white shadow-sm'
@@ -222,7 +255,7 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
           <button
             type="button"
             disabled={isSubmitting}
-            onClick={() => setMode('zip')}
+            onClick={() => handleModeChange('zip')}
             className={`py-2 text-xs font-medium rounded-lg transition-colors flex items-center justify-center gap-2 ${
               mode === 'zip'
                 ? 'bg-neutral-800 text-white shadow-sm'
@@ -237,9 +270,19 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
         {/* Form Body */}
         <div className="p-5 space-y-4">
           {error && (
-            <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-xl text-xs text-red-400 flex items-start gap-2">
-              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-              <span>{error}</span>
+            <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-xl text-xs text-red-400 flex items-start justify-between gap-2">
+              <div className="flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span className="leading-relaxed">{error}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setError(null)}
+                className="text-red-400/70 hover:text-red-300 p-0.5 rounded transition-colors"
+                title="Dismiss message"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
             </div>
           )}
 
@@ -276,18 +319,29 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
                 <input
                   type="text"
                   required
-                  placeholder="https://github.com/expressjs/express or pallets/flask"
+                  placeholder="https://github.com/iam-veeramalla/Docker-Zero-to-Hero or expressjs/express"
                   value={gitUrl}
-                  onChange={e => setGitUrl(e.target.value)}
+                  onChange={e => {
+                    setGitUrl(e.target.value);
+                    if (error) setError(null);
+                  }}
                   className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-xs text-neutral-100 placeholder:text-neutral-500 focus:outline-none focus:border-emerald-500 font-mono"
                 />
-                <div className="flex items-center gap-1.5 pt-1 text-[11px] text-neutral-400">
+                <div className="flex flex-wrap items-center gap-1.5 pt-1 text-[11px] text-neutral-400">
                   <span>Quick try:</span>
-                  {['expressjs/express', 'pallets/flask', 'tiangolo/fastapi'].map(example => (
+                  {[
+                    'iam-veeramalla/Docker-Zero-to-Hero',
+                    'expressjs/express',
+                    'pallets/flask',
+                    'tiangolo/fastapi',
+                  ].map(example => (
                     <button
                       key={example}
                       type="button"
-                      onClick={() => setGitUrl(`https://github.com/${example}`)}
+                      onClick={() => {
+                        setGitUrl(`https://github.com/${example}`);
+                        if (error) setError(null);
+                      }}
                       className="text-emerald-400 hover:text-emerald-300 underline font-mono text-[10px]"
                     >
                       {example}
@@ -310,9 +364,23 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
           ) : (
             <form onSubmit={handleZipSubmit} className="space-y-4">
               <div className="space-y-1.5">
-                <label className="text-xs font-medium text-neutral-300">
-                  Upload Codebase ZIP Archive
-                </label>
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-medium text-neutral-300">
+                    Upload Codebase ZIP Archive
+                  </label>
+                  {file && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFile(null);
+                        if (error) setError(null);
+                      }}
+                      className="text-[11px] text-neutral-400 hover:text-red-400 underline"
+                    >
+                      Remove file
+                    </button>
+                  )}
+                </div>
                 <div
                   onDragOver={handleDragOver}
                   onDragLeave={handleDragLeave}
@@ -328,7 +396,16 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
                     accept=".zip"
                     onChange={e => {
                       if (e.target.files?.[0]) {
-                        setFile(e.target.files[0]);
+                        const selected = e.target.files[0];
+                        if (!selected.name.toLowerCase().endsWith('.zip')) {
+                          setError('Please select a valid .zip file archive.');
+                          return;
+                        }
+                        if (selected.size > 50 * 1024 * 1024) {
+                          setError(`Archive exceeds the 50MB limit (${(selected.size / (1024 * 1024)).toFixed(1)}MB).`);
+                          return;
+                        }
+                        setFile(selected);
                         setError(null);
                       }
                     }}
