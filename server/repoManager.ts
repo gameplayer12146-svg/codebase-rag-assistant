@@ -222,18 +222,27 @@ export class RepositoryManager {
 
     // Extract owner/repo from various formats:
     // https://github.com/owner/repo
+    // https://github.com/owner/repo/tree/main/...
     // github.com/owner/repo
     // git@github.com:owner/repo.git
     // owner/repo
     let owner = '';
     let repo = '';
 
-    const ghMatch = cleanUrl.match(/(?:github\.com[/:])([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+)/i);
+    // Strip protocols, query params, hash, and trailing slash
+    const sanitizedUrl = cleanUrl
+      .replace(/^https?:\/\//i, '')
+      .replace(/^git@github\.com:/i, 'github.com/')
+      .split('?')[0]
+      .split('#')[0]
+      .replace(/\/+$/, '');
+
+    const ghMatch = sanitizedUrl.match(/github\.com\/([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+)/i);
     if (ghMatch) {
       owner = ghMatch[1];
-      repo = ghMatch[2].replace(/\.git$/, '').split('/')[0];
+      repo = ghMatch[2].replace(/\.git$/, '');
     } else {
-      const shortMatch = cleanUrl.match(/^([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+)$/);
+      const shortMatch = sanitizedUrl.match(/^([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+)/);
       if (shortMatch) {
         owner = shortMatch[1];
         repo = shortMatch[2].replace(/\.git$/, '');
@@ -251,6 +260,8 @@ export class RepositoryManager {
       const downloadCandidates = [
         `https://github.com/${owner}/${repo}/archive/refs/heads/main.zip`,
         `https://github.com/${owner}/${repo}/archive/refs/heads/master.zip`,
+        `https://codeload.github.com/${owner}/${repo}/zip/refs/heads/main`,
+        `https://codeload.github.com/${owner}/${repo}/zip/refs/heads/master`,
         `https://api.github.com/repos/${owner}/${repo}/zipball`,
       ];
 
@@ -443,6 +454,9 @@ export class RepositoryManager {
       state.metadata.source_files = supportedCount;
       state.metadata.ignored_files = ignoredCount;
 
+      // Yield event loop
+      await new Promise(r => setImmediate(r));
+
       // Calculate language percentages
       const totalSupported = Math.max(1, supportedCount);
       const languages: Record<string, number> = {};
@@ -493,6 +507,9 @@ export class RepositoryManager {
       state.metadata.functions_count = funcsCount;
       state.metadata.classes_count = classesCount;
 
+      // Yield event loop
+      await new Promise(r => setImmediate(r));
+
       // 3. Meaningful code chunking
       state.metadata.progress = {
         ...state.metadata.progress!,
@@ -508,6 +525,9 @@ export class RepositoryManager {
       const chunks = chunkSymbols(repoId, allSymbols);
       state.chunks = chunks;
       state.metadata.chunks_count = chunks.length;
+
+      // Yield event loop
+      await new Promise(r => setImmediate(r));
 
       // 4. Generate embeddings
       state.metadata.progress = {
@@ -525,6 +545,9 @@ export class RepositoryManager {
         chunks[i].embedding = embeddings[i];
       }
 
+      // Yield event loop
+      await new Promise(r => setImmediate(r));
+
       // 5. Store vectors into partitioned vector store
       state.metadata.progress = {
         ...state.metadata.progress!,
@@ -534,6 +557,9 @@ export class RepositoryManager {
       };
 
       await defaultVectorStore.addChunks(repoId, chunks, embeddings);
+
+      // Yield event loop
+      await new Promise(r => setImmediate(r));
 
       // 6. Build architecture relationship graph
       const activeFiles = Array.from(state.files.values()).filter(f => f.isSupported);

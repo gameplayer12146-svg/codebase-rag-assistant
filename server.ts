@@ -194,7 +194,7 @@ async function startServer() {
   });
 
   // Catch-all for undefined /api routes: always return JSON 404 instead of HTML
-  app.all('/api/*', (req, res) => {
+  app.all(['/api', '/api/*'], (req, res) => {
     res.status(404).json({ error: `API endpoint '${req.path}' not found` });
   });
 

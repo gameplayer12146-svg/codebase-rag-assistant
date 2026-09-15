@@ -6,20 +6,27 @@ export function buildArchitectureGraph(
 ): ArchitectureGraph {
   const nodes: ArchitectureNode[] = [];
   const edges: ArchitectureEdge[] = [];
-  const fileNodeMap = new Map<string, ArchitectureNode>();
+
+  // Limit to top 50 most relevant files to keep visualization clean and fast
+  const targetFiles = files.slice(0, 50);
+  const fileLookup = new Map<string, string>(); // basename -> fullPath
 
   // 1. Create file/module nodes
-  for (const f of files) {
-    const symbolsInFile = symbols.filter(s => s.file_path === f.path).map(s => s.symbol_name);
-    let type: ArchitectureNode['type'] = 'module';
+  for (const f of targetFiles) {
+    const symbolsInFile = symbols
+      .filter(s => s.file_path === f.path)
+      .slice(0, 8)
+      .map(s => s.symbol_name);
 
-    if (f.path.includes('auth') || f.path.includes('login')) {
+    let type: ArchitectureNode['type'] = 'module';
+    const lower = f.path.toLowerCase();
+    if (lower.includes('auth') || lower.includes('login') || lower.includes('session')) {
       type = 'service';
-    } else if (f.path.includes('db') || f.path.includes('database')) {
+    } else if (lower.includes('db') || lower.includes('database') || lower.includes('model') || lower.includes('schema')) {
       type = 'database';
-    } else if (f.path.includes('main') || f.path.includes('server') || f.path.includes('router')) {
+    } else if (lower.includes('main') || lower.includes('server') || lower.includes('router') || lower.includes('api') || lower.includes('controller')) {
       type = 'router';
-    } else if (f.path.includes('user') || f.path.includes('service')) {
+    } else if (lower.includes('service') || lower.includes('util') || lower.includes('helper')) {
       type = 'service';
     }
 
@@ -32,65 +39,55 @@ export function buildArchitectureGraph(
     };
 
     nodes.push(node);
-    fileNodeMap.set(f.path, node);
+
+    // Register by base name without extension
+    const baseName = (f.path.split('/').pop() || '').replace(/\.[^/.]+$/, '').toLowerCase();
+    if (baseName) {
+      fileLookup.set(baseName, f.path);
+    }
   }
 
-  // 2. Extract import relationships and function call relationships
-  for (const f of files) {
-    const lines = f.content.split('\n');
+  // 2. Extract import relationships fast (only inspect import lines)
+  const existingEdgeSet = new Set<string>();
 
+  for (const f of targetFiles) {
+    const lines = f.content.split('\n');
     for (const line of lines) {
       const trimmed = line.trim();
+      // Fast check: only process lines that look like imports
+      const isImport =
+        trimmed.startsWith('import ') ||
+        trimmed.startsWith('from ') ||
+        trimmed.includes('require(') ||
+        trimmed.startsWith('use ') ||
+        trimmed.startsWith('include ');
 
-      // Check imports: from src.auth.login import ... or import ... from './...'
-      for (const targetFile of files) {
-        if (targetFile.path === f.path) continue;
+      if (!isImport) continue;
 
-        const targetBase = targetFile.path.replace(/\.[^/.]+$/, ''); // remove ext
-        const targetParts = targetBase.split('/');
-        const targetName = targetParts[targetParts.length - 1];
+      // Check if any target file's base name appears in this import line
+      for (const [baseName, targetPath] of fileLookup.entries()) {
+        if (targetPath === f.path) continue;
+        if (baseName.length < 3) continue;
 
-        // Python import match
-        const pyImportMatch = trimmed.includes(targetBase.replace(/\//g, '.')) ||
-          (trimmed.startsWith('from ') && trimmed.includes(targetName)) ||
-          (trimmed.startsWith('import ') && trimmed.includes(targetName));
-
-        // TS/JS import match
-        const tsImportMatch = (trimmed.startsWith('import ') || trimmed.includes('require(')) &&
-          (trimmed.includes(`/${targetName}`) || trimmed.includes(`./${targetName}`));
-
-        if (pyImportMatch || tsImportMatch) {
-          const edgeId = `${f.path}->${targetFile.path}`;
-          if (!edges.some(e => `${e.from}->${e.to}` === edgeId)) {
+        if (trimmed.toLowerCase().includes(baseName)) {
+          const edgeKey = `${f.path}->${targetPath}`;
+          if (!existingEdgeSet.has(edgeKey)) {
+            existingEdgeSet.add(edgeKey);
             edges.push({
               from: f.path,
-              to: targetFile.path,
+              to: targetPath,
               label: 'imports',
               relationship: 'imports',
             });
+            if (edges.length >= 60) break; // Cap edges for graph readability
           }
         }
       }
 
-      // Check symbol calls: e.g. login_user(...), get_db_connection(...)
-      for (const s of symbols) {
-        if (s.file_path !== f.path && s.symbol_name.length > 3) {
-          const callPattern = new RegExp(`\\b${s.symbol_name}\\s*\\(`, 'g');
-          if (callPattern.test(trimmed)) {
-            const edgeId = `${f.path}->${s.file_path}`;
-            if (!edges.some(e => `${e.from}->${e.to}` === edgeId)) {
-              edges.push({
-                from: f.path,
-                to: s.file_path,
-                label: `calls ${s.symbol_name}()`,
-                relationship: s.file_path.includes('database') || s.file_path.includes('db') ? 'queries' : 'calls',
-              });
-            }
-          }
-        }
-      }
+      if (edges.length >= 60) break;
     }
   }
 
   return { nodes, edges };
 }
+

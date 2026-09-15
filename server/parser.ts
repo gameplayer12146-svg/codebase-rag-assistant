@@ -272,7 +272,7 @@ function parseTypeScript(
         code: lines.slice(startLine - 1, endLine).join('\n'),
         signature: trimmed,
       });
-      i = endLine;
+      i = Math.max(i + 1, endLine);
       continue;
     }
 
@@ -318,7 +318,7 @@ function parseTypeScript(
         code: lines.slice(startLine - 1, endLine).join('\n'),
         signature: `${method} ${routePath}`,
       });
-      i = endLine;
+      i = Math.max(i + 1, endLine);
       continue;
     }
 
@@ -343,7 +343,7 @@ function parseTypeScript(
         code: lines.slice(startLine - 1, endLine).join('\n'),
         signature: trimmed,
       });
-      i = endLine;
+      i = Math.max(i + 1, endLine);
       continue;
     }
 
@@ -367,7 +367,7 @@ function parseTypeScript(
         code: lines.slice(startLine - 1, endLine).join('\n'),
         signature: trimmed,
       });
-      i = endLine;
+      i = Math.max(i + 1, endLine);
       continue;
     }
 
@@ -407,7 +407,7 @@ function parseGo(
         code: lines.slice(startLine - 1, endLine).join('\n'),
         signature: trimmed,
       });
-      i = endLine;
+      i = Math.max(i + 1, endLine);
       continue;
     }
 
@@ -430,7 +430,7 @@ function parseGo(
         code: lines.slice(startLine - 1, endLine).join('\n'),
         signature: trimmed,
       });
-      i = endLine;
+      i = Math.max(i + 1, endLine);
       continue;
     }
 
@@ -452,7 +452,7 @@ function parseGo(
         code: lines.slice(startLine - 1, endLine).join('\n'),
         signature: trimmed,
       });
-      i = endLine;
+      i = Math.max(i + 1, endLine);
       continue;
     }
 
@@ -520,7 +520,7 @@ function parseJava(
         code: lines.slice(startLine - 1, endLine).join('\n'),
         signature: trimmed,
       });
-      i = endLine;
+      i = Math.max(i + 1, endLine);
       continue;
     }
 
@@ -559,7 +559,7 @@ function parseCpp(
         code: lines.slice(startLine - 1, endLine).join('\n'),
         signature: trimmed,
       });
-      i = endLine;
+      i = Math.max(i + 1, endLine);
       continue;
     }
 
@@ -581,7 +581,7 @@ function parseCpp(
         code: lines.slice(startLine - 1, endLine).join('\n'),
         signature: trimmed,
       });
-      i = endLine;
+      i = Math.max(i + 1, endLine);
       continue;
     }
 
@@ -633,9 +633,9 @@ function findClosingBrace(lines: string[], startIdx: number): number {
       }
     }
     if (foundFirst && openCount <= 0) {
-      return j + 1;
+      return Math.max(startIdx + 1, j + 1);
     }
   }
   // Fallback if unclosed or multiline single block
-  return Math.min(lines.length, startIdx + 50);
+  return Math.max(startIdx + 1, Math.min(lines.length, startIdx + 50));
 }

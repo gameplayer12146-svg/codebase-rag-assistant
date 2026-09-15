@@ -181,4 +181,4 @@ export class GeminiEmbeddingService implements IEmbeddingService {
   }
 }
 
-export const defaultEmbeddingService = new GeminiEmbeddingService();
+export const defaultEmbeddingService = new LocalDenseEmbedder();
